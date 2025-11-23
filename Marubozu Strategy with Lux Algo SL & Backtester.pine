@@ -1,0 +1,232 @@
+
+//@version=5
+strategy("Marubozu Strategy with Lux Algo SL & Backtester", overlay=true, initial_capital = 25)
+
+// Input parameters
+C_Len = 14 // EMA depth for bodyAvg
+C_ShadowPercent = 5.0 // shadow size percentage
+C_DojiBodyPercent = 5.0
+C_MarubozuShadowPercent = 5.0
+
+// Enable/Disable BUY and SELL signals
+buyEnabled = input.bool(true, "Enable BUY Signals")
+sellEnabled = input.bool(false, "Enable SELL Signals")
+
+enableSRplot = input.bool(false, "Enable Lux Algo S&R")
+
+enabledOneTrade = input.bool(true, "Do not entry until previous one closes")
+
+showLabels = input.bool(true, "Show Labels")
+
+// Customizable TP and SL ratios
+tpRiskRewardRatio = input.float(1.0, "TP/SL Risk-Reward Ratio", step=0.1)
+slRiskRewardRatio = input.float(0.0, "Stop Loss Extra Margin", step=0.1)
+
+//SL Maximum pip
+usePipAmount = input.bool(false, "Use pip amount as SL")
+maxPipLoss = input.float(30.0, "Max pip allowed to SL", step=0.1)
+
+// Input parameters
+useAtrSL = input.bool(true, "Use pip ATR for SL")
+nATRPeriod = input(5, title="ATR Period")
+nATRMultip = input(3.5, title="ATR Multiplier")
+atrXtraMargin = input(0, title="ATR Extra Margin")
+
+// Calculate ATR and trailing stop loss
+xATR = ta.atr(nATRPeriod)
+nLoss = nATRMultip * xATR
+
+// Initialize xATRTrailingStop
+var float xATRTrailingStop = na
+
+// Input for lot size
+lotSize = input.float(0.1, "Lot Size", minval=0.01)
+
+var string msg = ""
+
+// Line IDs for stop loss lines
+var line entryLine = na
+var line stopLossLineBullish = na
+var line stopLossLineBearish = na
+var line tpLineBearish = na
+var line tpLineBullish = na
+
+// Define variables for exit conditions
+var float entryPrice = na
+var float takeProfitPrice = na
+var float stopLossPrice = na
+
+// Candle body and shadow calculations
+C_BodyHi = math.max(close, open)
+C_BodyLo = math.min(close, open)
+C_Body = C_BodyHi - C_BodyLo
+C_BodyAvg = ta.ema(C_Body, C_Len)
+C_LongBody = C_Body > C_BodyAvg
+C_UpShadow = high - C_BodyHi
+C_DnShadow = C_BodyLo - low
+C_HasUpShadow = C_UpShadow > C_ShadowPercent / 100 * C_Body
+C_HasDnShadow = C_DnShadow > C_ShadowPercent / 100 * C_Body
+C_Range = high - low
+C_IsDojiBody = C_Range > 0 and C_Body <= C_Range * C_DojiBodyPercent / 100
+
+
+//Support and Resistance Levels with Breaks'
+toggleBreaks = input(false, title='Show Breaks')
+periods = input(10, title='Period ')
+leftBars = periods
+rightBars = periods
+volumeThresh = input(20, title='Volume Threshold')
+highUsePivot = fixnan(ta.pivothigh(leftBars, rightBars)[1])
+lowUsePivot = fixnan(ta.pivotlow(leftBars, rightBars)[1])
+r1 = plot(enableSRplot ? highUsePivot : na, color=ta.change(highUsePivot) ? na : #FF0000, linewidth=3, offset=-(rightBars + 1), title='Resistance')
+s1 = plot(enableSRplot ? lowUsePivot : na, color=ta.change(lowUsePivot) ? na : #233dee, linewidth=3, offset=-(rightBars + 1), title='Support')
+//Volume %
+short = ta.ema(volume, 5)
+long = ta.ema(volume, 10)
+osc = 100 * (short - long) / long
+//For breaks with volume
+plotshape(toggleBreaks and ta.crossunder(close, lowUsePivot) and not(open - close < high - open) and osc > volumeThresh, title='Break', text='B', style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+plotshape(toggleBreaks and ta.crossover(close, highUsePivot) and not(open - low > close - open) and osc > volumeThresh, title='Break', text='B', style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+//For bull / bear wicks
+plotshape(toggleBreaks and ta.crossover(close, highUsePivot) and open - low > close - open, title='Break', text='Bull Wick', style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+plotshape(toggleBreaks and ta.crossunder(close, lowUsePivot) and open - close < high - open, title='Break', text='Bear Wick', style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.new(color.white, 0), size=size.tiny)
+alertcondition(ta.crossunder(close, lowUsePivot) and osc > volumeThresh, title='Support Broken', message='Support Broken')
+alertcondition(ta.crossover(close, highUsePivot) and osc > volumeThresh, title='Resistance Broken', message='Resistance Broken')
+
+
+// Update the trailing stop based on price action
+if na(xATRTrailingStop[1])
+    xATRTrailingStop := close - nLoss
+else
+    xATRTrailingStop := close > xATRTrailingStop[1] and close[1] > xATRTrailingStop[1] ? math.max(xATRTrailingStop[1], close - nLoss) : (close < xATRTrailingStop[1] and close[1] < xATRTrailingStop[1] ? math.min(xATRTrailingStop[1], close + nLoss) :  (close > xATRTrailingStop[1] ? close - nLoss : close + nLoss))
+
+// Plot the ATR trailing stop
+plot(xATRTrailingStop, color=color.blue, title="ATR Trailing Stop")
+
+AtrBuyStopLoss = close - nLoss  // For long positions, stop-loss is below entry
+AtrSellStopLoss = close + nLoss // For short positions, stop-loss is above entry
+
+// Marubozu Bullish Pattern
+C_MarubozuWhiteBullish = (open < close) and C_LongBody and C_UpShadow <= C_MarubozuShadowPercent / 100 * C_Body and C_DnShadow <= C_MarubozuShadowPercent / 100 * C_Body
+if buyEnabled and C_MarubozuWhiteBullish and (enabledOneTrade? strategy.position_size == 0? true : false : true) and close > (AtrBuyStopLoss - atrXtraMargin)  
+    // Calculate TP and SL prices for long entry based on indicators
+    entryPrice := (close - open) / 2 + open
+    //takeProfitPrice := entryPrice + tpRiskRewardRatio * ta.atr(14)  // Using customizable TP ratio
+    stopLossPrice := lowUsePivot < entryPrice? lowUsePivot - slRiskRewardRatio : open - slRiskRewardRatio 
+    if usePipAmount
+        stopLossPrice := entryPrice - maxPipLoss - slRiskRewardRatio
+    if useAtrSL
+        stopLossPrice := AtrBuyStopLoss - atrXtraMargin
+    takeProfitPrice := tpRiskRewardRatio * (entryPrice - stopLossPrice) + entryPrice
+    strategy.entry("Buy", strategy.long, qty=lotSize) // Using lot size
+    msg := "BUY: " + str.tostring(entryPrice, "#.##") + " TP: " + str.tostring(takeProfitPrice, "#.##") + " SL: " + str.tostring(stopLossPrice, "#.##")
+    if showLabels
+        label.new(bar_index + 20, entryPrice, "BUY: " + str.tostring(entryPrice, "#.##") + " TP: " + str.tostring(takeProfitPrice, "#.##") + " SL: " + str.tostring(stopLossPrice, "#.##"), xloc=xloc.bar_index, yloc=yloc.price, color=color.blue, textcolor=color.white, size=size.small)
+    // Create a red background box between the entry and stop loss lines
+    box.new(left=bar_index, top=entryPrice, right=bar_index + 20, bottom=stopLossPrice, border_color=color.red, bgcolor=color.new(color.red, 90))
+    box.new(left=bar_index, top=takeProfitPrice, right=bar_index + 20, bottom=entryPrice, border_color=color.green, bgcolor=color.new(color.green, 90))
+
+
+// Marubozu Bearish Pattern
+C_MarubozuBlackBearish = (open > close) and C_LongBody and C_UpShadow <= C_MarubozuShadowPercent / 100 * C_Body and C_DnShadow <= C_MarubozuShadowPercent / 100 * C_Body
+if sellEnabled and C_MarubozuBlackBearish and (enabledOneTrade? strategy.position_size == 0? true : false : true) and close < (AtrSellStopLoss + atrXtraMargin)  
+    // Calculate TP and SL prices for short entry based on indicators
+    entryPrice := open - (open - close) / 2
+    //takeProfitPrice := entryPrice - tpRiskRewardRatio * ta.atr(14)  // Using customizable TP ratio
+    stopLossPrice := highUsePivot > entryPrice? highUsePivot + slRiskRewardRatio : close + slRiskRewardRatio
+    if usePipAmount
+        stopLossPrice := entryPrice + maxPipLoss + slRiskRewardRatio
+    if useAtrSL
+        stopLossPrice := AtrSellStopLoss + atrXtraMargin
+    takeProfitPrice := entryPrice - tpRiskRewardRatio * (stopLossPrice - entryPrice) 
+    strategy.entry("Sell", strategy.short, qty=lotSize) // Using lot size
+    // Create SELL label with entry, TP, and SL prices
+    msg:="SELL: " + str.tostring(entryPrice, "#.##") + " TP: " + str.tostring(takeProfitPrice, "#.##") + " SL: " + str.tostring(stopLossPrice, "#.##")
+    if showLabels
+        label.new(bar_index + 20, entryPrice, "SELL: " + str.tostring(entryPrice, "#.##") + " TP: " + str.tostring(takeProfitPrice, "#.##") + " SL: " + str.tostring(stopLossPrice, "#.##"), xloc=xloc.bar_index, yloc=yloc.price, color=color.red, textcolor=color.white, size=size.small)
+    // Create a red background box between the entry and stop loss lines
+    box.new(left=bar_index, top=stopLossPrice, right=bar_index + 20, bottom=entryPrice, border_color=color.red, bgcolor=color.new(color.red, 90))
+    box.new(left=bar_index, top=entryPrice, right=bar_index + 20, bottom=takeProfitPrice, border_color=color.green, bgcolor=color.new(color.green, 90))    
+
+var bool buyAlert = buyEnabled and C_MarubozuWhiteBullish and (enabledOneTrade? strategy.position_size == 0? true : false : true)
+var bool sellAlert = sellEnabled and C_MarubozuBlackBearish and (enabledOneTrade? strategy.position_size == 0? true : false : true)
+
+/// Initialize variables to track cumulative P/L and win rate
+var float cumulativePL = 0
+var int winTrades = 0
+var int totalTrades = 0
+var float lastPL = 0
+
+// Check for exits and calculate P/L for each closed trade
+if (strategy.position_size > 0 and high >= takeProfitPrice)
+    lastPL := 9.683893627696939 * (takeProfitPrice - entryPrice) * lotSize // Calculate profit/loss for this trade
+    cumulativePL += lastPL // Add to cumulative profit/loss
+    totalTrades += 1
+    if lastPL > 0
+        winTrades += 1 // Count winning trades
+    strategy.close("Buy", comment="Buy TP Hit -> closed: " + str.tostring(takeProfitPrice) + " entry: " + str.tostring(entryPrice))
+    // Reset TP and SL after exit
+    takeProfitPrice := na
+    stopLossPrice := na 
+    winRate = (totalTrades > 0) ? (winTrades / totalTrades) * 100 : na
+    // Display the results on the chart
+    if showLabels
+        label.new( bar_index, high + 30, "GAINED: ++$" + str.tostring(lastPL, "#.##") + "\nCumulative P/L: $" + str.tostring(cumulativePL, "#.##") + "\nWin Rate: " + str.tostring(winRate, "#.##") + "%" + "\nTotal Trades: " + str.tostring(totalTrades), color=color.green, textcolor=color.white, size=size.small)
+
+if (strategy.position_size < 0 and low <= takeProfitPrice)
+    lastPL:= 9.683893627696939 * (entryPrice - takeProfitPrice) * lotSize // Calculate profit/loss for this trade
+    cumulativePL += lastPL // Add to cumulative profit/loss
+    totalTrades += 1
+    if lastPL > 0
+        winTrades += 1 // Count winning trades
+    strategy.close("Sell", comment="Sell TP Hit -> closed: " + str.tostring(takeProfitPrice) + " entry: " + str.tostring(entryPrice))
+    // Reset TP and SL after exit
+    takeProfitPrice := na
+    stopLossPrice := na
+    winRate = (totalTrades > 0) ? (winTrades / totalTrades) * 100 : na
+    // Display the results on the chart
+    if showLabels
+        label.new( bar_index, high, "GAINED: ++$" + str.tostring(lastPL, "#.##") + "\nCumulative P/L: $" + str.tostring(cumulativePL, "#.##") + "\nWin Rate: " + str.tostring(winRate, "#.##") + "%"+ "\nTotal Trades: " + str.tostring(totalTrades), color=color.green, textcolor=color.white, size=size.small)
+
+// Stop Loss Hit Check
+if (strategy.position_size > 0 and low <= stopLossPrice)
+    lastPL := 9.683893627696939 * (stopLossPrice - entryPrice) * lotSize // Calculate profit/loss for this trade
+    cumulativePL += lastPL // Add to cumulative profit/loss
+    totalTrades += 1
+    if lastPL > 0
+        winTrades += 1 // Count winning trades
+    strategy.close("Buy", comment="Buy SL Hit -> closed: " + str.tostring(stopLossPrice) + " entry: " + str.tostring(entryPrice))
+    // Reset SL after hit
+    stopLossPrice := na 
+    winRate = (totalTrades > 0) ? (winTrades / totalTrades) * 100 : na
+    // Display the results on the chart
+    if showLabels
+        label.new( bar_index, high, "LOST: --$" + str.tostring(lastPL*-1, "#.##") + "\nCumulative P/L: $" + str.tostring(cumulativePL, "#.##") + "\nWin Rate: " + str.tostring(winRate, "#.##") + "%"+ "\nTotal Trades: " + str.tostring(totalTrades), color=color.red, textcolor=color.white, size=size.small)
+
+if (strategy.position_size < 0 and high >= stopLossPrice)
+    lastPL := 9.683893627696939 * (entryPrice - stopLossPrice) * lotSize // Calculate profit/loss for this trade
+    cumulativePL += lastPL // Add to cumulative profit/loss
+    totalTrades += 1
+    if lastPL > 0
+        winTrades += 1 // Count winning trades
+    strategy.close("Sell", comment="Sell SL Hit -> closed: " + str.tostring(stopLossPrice) + " entry: " + str.tostring(entryPrice))
+    // Reset SL after hit
+    stopLossPrice := na 
+    // Calculate win rate
+    winRate = (totalTrades > 0) ? (winTrades / totalTrades) * 100 : na
+    // Display the results on the chart
+    if showLabels
+        label.new( bar_index, high, "LOST: --$" + str.tostring(lastPL*-1, "#.##") + "\nCumulative P/L: $" + str.tostring(cumulativePL, "#.##") + "\nWin Rate: " + str.tostring(winRate, "#.##") + "%"+ "\nTotal Trades: " + str.tostring(totalTrades), color=color.red, textcolor=color.white, size=size.small)
+
+
+
+// Background highlights for patterns
+bgcolor(C_MarubozuWhiteBullish and buyEnabled ? color.new(color.green, 90) : na)
+bgcolor(C_MarubozuBlackBearish and sellEnabled ? color.new(color.red, 90) : na)
+
+alertcondition(buyAlert, title="Buy Signal", message="Entry signal triggered. Check chart for TP and SL values")
+alertcondition(sellAlert, title="Sell Signal", message="Entry signal triggered. Check chart for TP and SL values")
+
+
+
+
