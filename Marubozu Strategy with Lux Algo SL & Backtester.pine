@@ -224,8 +224,14 @@ if (strategy.position_size < 0 and high >= stopLossPrice)
 bgcolor(C_MarubozuWhiteBullish and buyEnabled ? color.new(color.green, 90) : na)
 bgcolor(C_MarubozuBlackBearish and sellEnabled ? color.new(color.red, 90) : na)
 
-alertcondition(buyAlert, title="Buy Signal", message="Entry signal triggered. Check chart for TP and SL values")
-alertcondition(sellAlert, title="Sell Signal", message="Entry signal triggered. Check chart for TP and SL values")
+// Alert conditions for webhook API integration
+// When setting up alerts in TradingView:
+// 1. Create alert with these conditions
+// 2. In webhook URL, use JSON format with TradingView placeholders:
+//    {"signal":"BUY","symbol":"{{ticker}}","price":{{close}},"time":"{{time}}","timeframe":"{{interval}}","message":"{{message}}"}
+// 3. The {{message}} will contain the alert text below
+alertcondition(buyAlert, title="Buy Signal", message="BUY Signal: Entry=" + str.tostring(close, "#.##") + " | Check chart for TP/SL")
+alertcondition(sellAlert, title="Sell Signal", message="SELL Signal: Entry=" + str.tostring(close, "#.##") + " | Check chart for TP/SL")
 
 
 

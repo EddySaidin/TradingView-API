@@ -10,10 +10,12 @@
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
 #include <Trade\AccountInfo.mqh>
+#include <Trade\OrderInfo.mqh>
 
 CTrade trade;
 CPositionInfo position;
 CAccountInfo account;
+COrderInfo order;
 
 //--- Input parameters
 input group "=== Pattern Settings ==="
@@ -46,6 +48,7 @@ input int      VolumeThresh = 20;              // Volume Threshold
 
 input group "=== Display ==="
 input bool     ShowLabels = true;             // Show Labels
+input bool     UseMarketOrders = false;       // Use Market Orders (better for backtesting)
 
 //--- Global variables
 int atrHandle;
@@ -132,8 +135,14 @@ void OnTick()
    // Check for exits first
    CheckExits();
    
-   // Check for new entries only if no position exists (if enabled)
-   if(EnabledOneTrade && HasOpenPosition())
+   // Update ticket if order was executed and became a position
+   if(ticket > 0 && !HasPendingOrder() && HasOpenPosition())
+   {
+      ticket = GetPositionTicket();
+   }
+   
+   // Check for new entries only if no position or pending order exists (if enabled)
+   if(EnabledOneTrade && (HasOpenPosition() || HasPendingOrder()))
       return;
    
    // Calculate indicators
@@ -154,6 +163,14 @@ void OnTick()
    // Update body EMA
    UpdateBodyEMA();
    double bodyAvg = bodyEMA;
+   
+   // Safety check - if bodyEMA is 0 or invalid, skip this bar
+   if(bodyAvg <= 0)
+   {
+      if(MQLInfoInteger(MQL_TESTER))
+         Print("Warning: Body EMA is invalid: ", bodyAvg);
+      return;
+   }
    
    // Get current candle data
    double open = iOpen(_Symbol, PERIOD_CURRENT, 0);
@@ -187,6 +204,14 @@ void OnTick()
                                   (C_UpShadow <= C_MarubozuShadowPercent / 100.0 * C_Body) && 
                                   (C_DnShadow <= C_MarubozuShadowPercent / 100.0 * C_Body);
    
+   // Debug output
+   if(MQLInfoInteger(MQL_TESTER) && C_MarubozuWhiteBullish)
+   {
+      Print("Pattern detected - Open: ", open, " Close: ", close, " Body: ", C_Body, " BodyAvg: ", bodyAvg, 
+            " UpShadow: ", C_UpShadow, " DnShadow: ", C_DnShadow, " BuyEnabled: ", BuyEnabled,
+            " Close > AtrBuyStopLoss: ", (close > (AtrBuyStopLoss - AtrXtraMargin)));
+   }
+   
    if(BuyEnabled && C_MarubozuWhiteBullish && close > (AtrBuyStopLoss - AtrXtraMargin))
    {
       // Calculate entry, TP, and SL
@@ -208,14 +233,52 @@ void OnTick()
       stopLossPrice = NormalizeDouble(stopLossPrice, _Digits);
       takeProfitPrice = NormalizeDouble(takeProfitPrice, _Digits);
       
-      // Open buy position
-      if(trade.Buy(LotSize, _Symbol, 0, stopLossPrice, takeProfitPrice, "Marubozu Buy"))
+      bool orderPlaced = false;
+      
+      if(UseMarketOrders || MQLInfoInteger(MQL_TESTER))
       {
-         ticket = GetPositionTicket();
+         // Use market order for immediate execution (better for backtesting)
+         orderPlaced = trade.Buy(LotSize, _Symbol, 0, stopLossPrice, takeProfitPrice, "Marubozu Buy");
+         if(orderPlaced)
+         {
+            ticket = GetPositionTicket();
+            Print("BUY Market Order executed at: ", entryPrice, " TP: ", takeProfitPrice, " SL: ", stopLossPrice);
+         }
+      }
+      else
+      {
+         // Use pending order - place BuyStop above the high of the pattern candle
+         double orderPrice = high + (high * 0.0001); // Slightly above high to ensure execution
+         orderPrice = NormalizeDouble(orderPrice, _Digits);
+         
+         if(orderPrice > close)
+         {
+            // Place BuyStop order (price needs to rise to entry)
+            orderPlaced = trade.BuyStop(LotSize, orderPrice, _Symbol, stopLossPrice, takeProfitPrice, ORDER_TIME_GTC, 0, "Marubozu Buy");
+         }
+         else
+         {
+            // If order price is below close, use market order instead
+            orderPlaced = trade.Buy(LotSize, _Symbol, 0, stopLossPrice, takeProfitPrice, "Marubozu Buy");
+         }
+         
+         if(orderPlaced)
+         {
+            ticket = trade.ResultOrder();
+            if(ticket == 0) ticket = GetPositionTicket();
+         }
+      }
+      
+      if(orderPlaced)
+      {
          if(ShowLabels)
             CreateLabel("BUY: " + DoubleToString(entryPrice, _Digits) + " TP: " + 
                        DoubleToString(takeProfitPrice, _Digits) + " SL: " + 
                        DoubleToString(stopLossPrice, _Digits), clrBlue);
+      }
+      else
+      {
+         Print("Failed to place BUY order. Error: ", trade.ResultRetcodeDescription(), " Entry: ", entryPrice, " Close: ", close);
       }
    }
    
@@ -245,14 +308,52 @@ void OnTick()
       stopLossPrice = NormalizeDouble(stopLossPrice, _Digits);
       takeProfitPrice = NormalizeDouble(takeProfitPrice, _Digits);
       
-      // Open sell position
-      if(trade.Sell(LotSize, _Symbol, 0, stopLossPrice, takeProfitPrice, "Marubozu Sell"))
+      bool orderPlaced = false;
+      
+      if(UseMarketOrders || MQLInfoInteger(MQL_TESTER))
       {
-         ticket = GetPositionTicket();
+         // Use market order for immediate execution (better for backtesting)
+         orderPlaced = trade.Sell(LotSize, _Symbol, 0, stopLossPrice, takeProfitPrice, "Marubozu Sell");
+         if(orderPlaced)
+         {
+            ticket = GetPositionTicket();
+            Print("SELL Market Order executed at: ", entryPrice, " TP: ", takeProfitPrice, " SL: ", stopLossPrice);
+         }
+      }
+      else
+      {
+         // Use pending order - place SellStop below the low of the pattern candle
+         double orderPrice = low - (low * 0.0001); // Slightly below low to ensure execution
+         orderPrice = NormalizeDouble(orderPrice, _Digits);
+         
+         if(orderPrice < close)
+         {
+            // Place SellStop order (price needs to fall to entry)
+            orderPlaced = trade.SellStop(LotSize, orderPrice, _Symbol, stopLossPrice, takeProfitPrice, ORDER_TIME_GTC, 0, "Marubozu Sell");
+         }
+         else
+         {
+            // If order price is above close, use market order instead
+            orderPlaced = trade.Sell(LotSize, _Symbol, 0, stopLossPrice, takeProfitPrice, "Marubozu Sell");
+         }
+         
+         if(orderPlaced)
+         {
+            ticket = trade.ResultOrder();
+            if(ticket == 0) ticket = GetPositionTicket();
+         }
+      }
+      
+      if(orderPlaced)
+      {
          if(ShowLabels)
             CreateLabel("SELL: " + DoubleToString(entryPrice, _Digits) + " TP: " + 
                        DoubleToString(takeProfitPrice, _Digits) + " SL: " + 
                        DoubleToString(stopLossPrice, _Digits), clrRed);
+      }
+      else
+      {
+         Print("Failed to place SELL order. Error: ", trade.ResultRetcodeDescription(), " Entry: ", entryPrice, " Close: ", close);
       }
    }
 }
@@ -509,6 +610,26 @@ bool HasOpenPosition()
       {
          if(position.Symbol() == _Symbol && position.Magic() == MagicNumber)
             return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if pending order exists                                     |
+//+------------------------------------------------------------------+
+bool HasPendingOrder()
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong orderTicket = OrderGetTicket(i);
+      if(orderTicket > 0)
+      {
+         if(order.Select(orderTicket))
+         {
+            if(order.Symbol() == _Symbol && order.Magic() == MagicNumber)
+               return true;
+         }
       }
    }
    return false;
